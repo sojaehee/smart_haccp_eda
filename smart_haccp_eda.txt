@@ -1,0 +1,874 @@
+import math
+from itertools import combinations
+import pandas as pd
+import numpy as np
+import datetime as dt
+from datetime import date, datetime
+import csv
+import matplotlib
+import matplotlib.pyplot as plt
+from matplotlib import font_manager, rc
+from matplotlib import dates
+import seaborn as sns
+import os
+import scipy.stats
+import scipy.stats as stats
+from scipy.stats import kstest, mode, bartlett, levene
+import pingouin as pg
+
+import warnings
+warnings.filterwarnings('ignore')
+np.seterr(invalid='ignore')     # spearman 사용시 나오는 RuntimeWarning ignore
+
+from xgboost import XGBRegressor
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error, mean_absolute_percentage_error
+from sklearn.metrics import classification_report
+import lightgbm as lgb
+from sklearn.linear_model import LinearRegression, Ridge, Lasso
+from sklearn.linear_model import LogisticRegression
+import joblib
+from sklearn.model_selection import GridSearchCV
+import itertools
+
+# 환경설정
+pd.set_option('display.max_columns', 100)
+pd.set_option('display.max_row', 100)
+plt.rcParams['figure.figsize'] = [12, 8]
+
+encoding = 'euc-kr'
+font_name = font_manager.FontProperties(fname="C:\Windows\Fonts\malgunbd.ttf").get_name()
+rc('font', family=font_name)
+matplotlib.rcParams['axes.unicode_minus'] = False  ## 마이너스 표시 제대로 출력
+
+### 데이터 현황분석
+# 산란계 기상붙은 데이터 불러오기
+egg_df = pd.read_csv(path + 'egg_datamart_v1(221031).csv', encoding='euc-kr')
+
+# eda 활용하지 않는 컬럼 제거
+egg_df = egg_df.drop(columns=['백신_백신약품명','백신_제조회사','백신_접종방법','작업내용_일반약품사용','작업내용_기타','작업내용_비고'])
+
+# 폐사건수 nan값 0으로 바꿈
+egg_df['폐사건수_일'] = egg_df['폐사건수_일'].fillna(0)
+
+# 전체수수_주령 생성
+egg_df['전체수수_주령'] = egg_df['폐사건수_주령'] + egg_df['생존수수_주령']
+
+# 사료섭취현황 도태 0으로 변환
+egg_df.loc[(egg_df['사료섭취_실적(사양현황)']=='도태') | (egg_df['사료섭취_실적(사양현황)']==' 도태 '), '사료섭취_실적(사양현황)'] = 0
+egg_df['사료섭취_실적(사양현황)'] = egg_df['사료섭취_실적(사양현황)'].astype('float')
+
+# 바람 두개 있는 경우 한개만 선택
+egg_df.loc[egg_df['wd_mode'].str.contains('280 290')==True, 'wd_mode'] = 280
+egg_df.loc[egg_df['wd_mode'].str.contains('280 300')==True, 'wd_mode'] = 280
+egg_df.loc[egg_df['wd_mode'].str.contains('20 320')==True, 'wd_mode'] = 20
+egg_df.loc[egg_df['wd_mode'].str.contains('260 270')==True, 'wd_mode'] = 260
+
+# 점등시간 정보
+egg_df.loc[egg_df['점등'] == '00:00:00', '점등'] = '0'        # 00:00:00 -> 0으로 변경
+
+## 빈 값 0으로 채움
+egg_df = egg_df.fillna(0)
+
+# 컬럼명 변경
+egg_df = egg_df.rename(columns={'수당(음수)':'수당_음수'})
+
+# 20주령 도태계군 제거
+egg_df = egg_df[egg_df['file_date']!=200922]
+
+###### 육추계 그룹화 변수 추가
+eda_save_path = 'D:/한국식품안전관리인증원/분석/eda/산란계/221110/생육환경(육추)/'
+egg_df2 = egg_df[egg_df['주령']<=15]      # 육추 데이터만 분리(1~15주령)
+egg_df3 = egg_df.copy()                # 구분된 데이터 egg_df3에 넣음
+
+### 먹이급이량(주), 음수량(주), 체중(주) -> 체중의 경우 첫 주령의 값이 모두 0이므로 3주령 이후의 평균 변화율로 구함
+columns_list = ['사료섭취_실적(사양현황)', '음수섭취_실적', '평균체중_실적(주령)']
+for column in columns_list:
+    egg_condition = egg_df2[['file_date', '주령', column]]
+    egg_condition = egg_condition.drop_duplicates()
+    egg_condition = egg_condition.sort_values(by=['file_date', '주령'], ascending=[True, True])
+
+    egg_condition['shift'] = egg_condition.groupby('file_date')[column].shift(1)
+    egg_condition['change'] = egg_condition[column] - egg_condition['shift']
+    egg_condition['change_perc'] = (egg_condition['change'] / egg_condition['shift']) * 100
+
+    egg_condition.to_csv(eda_save_path + '계군별 ' + str(column) + ' 증감율_상세.csv', encoding='euc-kr', index=False)
+
+    egg_condition['change_perc'].apply(lambda x: 0 if math.isinf(x)==True else x)
+    if column == '평균체중_실적(주령)':
+        egg_condition = egg_condition[egg_condition['주령']>=3]
+    else:
+        pass
+    egg_condition2 = egg_condition.groupby('file_date')['change_perc'].mean().reset_index(name = column +'_mean')
+    egg_condition2.to_csv(eda_save_path + '계군별 ' + str(column) + ' 증감율.csv', encoding='euc-kr', index=False)
+    egg_df3 = egg_df3.merge(egg_condition2, how='left', on=['file_date'])
+
+egg_df3['feed_grp'] = egg_df3['사료섭취_실적(사양현황)_mean'].apply(lambda x: 1 if x<15 else (2 if (15<=x)&(x<16)
+                                                                                 else (3 if (16<=x)&(x<17) else(4 if (17<=x)&(x<18)
+                                                                                 else 5))))
+
+egg_df3['water_grp'] = egg_df3['음수섭취_실적_mean'].apply(lambda x: 1 if x<10 else (2 if (10<=x)&(x<20) else 3))
+
+egg_df3['weight_grp'] = egg_df3['평균체중_실적(주령)_mean'].apply(lambda x: 1 if x<20 else 2)
+
+### 점등
+# 점등 정보가 다른경우의 그룹 생성
+light = egg_df2[egg_df2['점등']!='0']
+light_df = light.groupby(['file_date'])['점등'].count().reset_index(name='light_count')
+light_gubun = list(light_df['light_count'].unique())
+
+egg_df3 = egg_df3.merge(light_df, how='left', on=['file_date'])
+#egg_df3['light_count'] = egg_df3['light_count'].apply(lambda x: 0 if x == light_gubun[0] else 1)
+
+light_group_val = light.groupby(['점등','주령','file_date'])['file_date'].count().reset_index(name='count')
+light_group_val = light_group_val.sort_values(by=['점등','주령', 'file_date'], ascending=[True, True, True])
+light_group_val.to_csv(eda_save_path + '계군별 점등 val_count.csv', encoding='euc-kr', index=False)
+
+del light, light_df, light_gubun, light_group_val
+
+### 백신
+# 백신 정보가 다른경우의 그룹 생성 -> 접종 횟수 or 접종 주령
+vacc_count = pd.read_csv('백신별 주령확인.csv', encoding='euc-kr')     #백신 주령확인 CSV 필요
+vacc_count_df = vacc_count.groupby(['column','file_date'])['주령'].count().fillna(0).reset_index(name='count')
+week_info = vacc_count[['column','file_date','주령']]
+vacc_check_df = vacc_count_df.merge(week_info, how='left', on=['column','file_date'])
+vacc_check_df.to_csv(eda_save_path + '계군_백신접종_count.csv', encoding='euc-kr', index=False)
+
+vacc_check_df = vacc_check_df.groupby(['column','file_date'])['주령'].count().reset_index(name='vacc_count')
+
+vacc_list = list(vacc_check_df['column'].unique())
+for vacc in vacc_list:
+    temp = vacc_check_df[vacc_check_df['column']==vacc]
+    if len(temp['vacc_count'].unique())!=1:
+        temp = temp.rename(columns={'vacc_count': vacc + '_count'})
+        temp = temp.drop(columns=['column'])
+        egg_df3 = egg_df3.merge(temp, how='left', on=['file_date'])
+    else:
+        pass
+
+del week_info, vacc_count, vacc_count_df, vacc_check_df
+
+### 작업내용
+cd_col_list = ['환경관리','환기관리','사료조정','급수조정','위치이동']
+for cd_col in cd_col_list:
+    condition = egg_df2.groupby([cd_col,'file_date'])['주령'].count().fillna(0).reset_index(name='count')
+    condition = condition[condition[cd_col]==1]
+    if len(condition['count'].unique())!=1:
+        temp = condition.rename(columns={'count':cd_col + '_count'})
+        temp = temp.drop(columns=[cd_col])
+        egg_df3 = egg_df3.merge(temp, how='left', on=['file_date'])
+    else:
+        pass
+    condition.to_csv(eda_save_path + '계군별 '+ str(cd_col) +' 횟수_count.csv', encoding='euc-kr', index=False)
+
+# 조도관리는 0,1로 구분이 아니므로 따로 뺌
+condition = egg_df2.groupby(['조도조정','file_date'])['주령'].count().fillna(0).reset_index(name='count')
+condition = condition[condition['조도조정']!=0]
+condition.to_csv(eda_save_path + '계군, 조도별 조정 횟수.csv', encoding='euc-kr', index=False)
+
+temp = egg_df2[egg_df2['조도조정']!=0]
+condition = temp.groupby(['file_date'])['조도조정'].count().fillna(0).reset_index(name='조도조정_count')
+condition.to_csv(eda_save_path + '계군별 조도조정 횟수.csv', encoding='euc-kr', index=False)
+egg_df3 = egg_df3.merge(condition, how='left', on=['file_date'])
+
+del condition, temp
+
+### 육추, 성계 위치
+gubun = egg_df2.groupby(['gubun','file_date'])['file_date'].count().reset_index(name='count')
+gubun.to_csv(eda_save_path + '계군별 육추위치 구분.csv', encoding='euc-kr', index=False)
+
+# 성계 위치(케이지) 구분
+gubun = egg_df2.groupby(['case','file_date'])['file_date'].count().reset_index(name='count')
+gubun.to_csv(eda_save_path + '계군별 성계위치(케이지) 구분.csv', encoding='euc-kr', index=False)
+
+egg_df2['gubun'].value_counts()
+egg_df2['feed_info'].value_counts()
+
+### 사료구분
+gubun = egg_df2.groupby(['feed_info','file_date'])['file_date'].count().reset_index(name='count')
+gubun.to_csv(eda_save_path + '계군별 사료 구분.csv', encoding='euc-kr', index=False)
+
+del gubun
+
+### 기상구분
+# 폭우 영향 계군 일강수량이 80이상이였던 계군
+rain_sum = egg_df2[egg_df2['rain_sum']>=80]
+weather = rain_sum.groupby(['file_date'])['rain_sum'].count().reset_index(name='rain_count')
+weather.to_csv(eda_save_path + '계군별 일강수량 80이상 구분.csv', encoding='euc-kr', index=False)
+egg_df3 = egg_df3.merge(weather, how='left', on=['file_date'])
+egg_df3['rain_count'] = egg_df3['rain_count'].fillna(0)
+
+# 폭염 영향 계군
+hot_temp = egg_df2[egg_df2['tp_1d_max']>=33]
+weather = hot_temp.groupby(['file_date'])['tp_1d_max'].count().reset_index(name='hot_count')
+weather.to_csv(eda_save_path + '계군별 폭염영향 구분.csv', encoding='euc-kr', index=False)
+egg_df3 = egg_df3.merge(weather, how='left', on=['file_date'])
+egg_df3['hot_count'] = egg_df3['hot_count'].fillna(0)
+
+# 풍속 단계별 일수 - 풍속의 평균이 몇단계였는지
+ws_power = egg_df2[['file_date','주령','ws_1d_max']]
+ws_power['ws_power_max'] = ws_power['ws_1d_max'].apply(lambda x: 1 if x<=0.4 else (2 if (0.4<x) & (x<=3.3) else (3 if (3.3<x)&(x<=7.9) else (4 if (7.9<x)&(x<=13.9) else 5))))
+
+weather = ws_power.groupby(['file_date'])['ws_power_max'].max().reset_index(name='ws_gubun')
+weather.to_csv(eda_save_path + '계군별 풍향세기 영향 구분.csv', encoding='euc-kr', index=False)
+egg_df3 = egg_df3.merge(weather, how='left', on=['file_date'])
+egg_df3['ws_gubun'] = egg_df3['ws_gubun'].fillna(0)
+
+## 입추계절 정보 생성
+egg_df3['file_month'] = egg_df3['file_date'].astype(str).str[2:4]
+spr = ['3', '4', '5']
+sum = ['6', '7', '8']
+aut = ['9', '10', '11']
+win = ['12', '1', '2']
+
+## 1 = 봄, 2 = 여름, 3 = 가을, 4= 겨울
+egg_df3['season'] = egg_df3['file_month'].apply(lambda x: 1 if any(i in x for i in spr) else (2 if any(i in x for i in sum) else (3 if any(i in x for i in aut) else 4)))
+
+## 병아리때 폐사율 구분 추가
+# 1~15 병아리시기
+egg_df2['전체수수_일'] = egg_df2['폐사건수_일'] + egg_df2['생존수수_일']
+egg_df2['폐사율_일'] = (egg_df2['폐사건수_일'] / egg_df2['전체수수_일']) * 100
+
+aa = egg_df2.groupby(['file_date'])['폐사율_일'].mean().reset_index(name='mean')
+aa.loc[aa['mean']<0.02,'egg_die_grp'] = 0
+aa.loc[(aa['mean']>=0.02)&(aa['mean']<0.03),'egg_die_grp'] = 1
+aa.loc[aa['mean']>=0.03,'egg_die_grp'] = 2
+aa.to_csv(eda_save_path + 'die_day_1~15.csv', encoding='euc-kr', index=False)
+aa = aa.drop(columns=['mean'])
+egg_df3 = egg_df3.merge(aa, how='left', on=['file_date'])
+
+del aa
+
+#################################################################################
+## 일별 폐사율 생성 - 성계의 오파란율
+chicken_df = egg_df3.copy()
+chicken_df['전체수수_일'] = chicken_df['폐사건수_일'] + chicken_df['생존수수_일']
+chicken_df['폐사율_일'] = (chicken_df['폐사건수_일'] / chicken_df['전체수수_일']) * 100
+chicken_df['lowQual'] = (chicken_df['주간_CRACK'] + chicken_df['주간_DIRTY']) * 100
+
+chicken_df2 = chicken_df[(chicken_df['주령']>=15)&(chicken_df['주령']<=53)]
+chicken_df2.to_csv('D:/한국식품안전관리인증원/분석 데이터/datamart/egg_datamart_v2.csv', encoding='euc-kr', index=False)
+
+
+##################################################################################
+### 생육환경 그룹별 오파란율 변화 확인 -> anova
+chicken_df2 = pd.read_csv('D:/한국식품안전관리인증원/분석 데이터/datamart/egg_datamart_v2.csv', encoding='euc-kr')
+
+### 전체계군 오파란율 평균
+lowqual = chicken_df2.groupby(['주령'])['lowQual'].mean().reset_index(name='mean')
+lq = lowqual[lowqual['주령']>=17]
+lq.to_csv(eda_save_path + '17~53주령 전체계군 오파란율 평균.csv', encoding = 'euc-kr', index=False)
+
+list_x = []
+for i in range(16, 53):
+    list_x.append(i+1)
+
+plt.rcParams['figure.figsize'] = [12, 8]
+plt.plot(lq['주령'], lq['mean'], label= '오파란율')
+plt.xlabel('주령')
+plt.xticks(list_x, rotation = 0, fontsize=7)
+plt.ylabel('오파란율(%)')
+plt.title('전체계군 주령별 오파란율(%)')
+plt.legend(fontsize=10)
+plt.savefig(eda_save_path + '전체계군 주령별 오파란율(%).png', bbox_inches='tight',pad_inches=1)
+plt.close()
+
+
+anova_df = pd.DataFrame()
+
+group_chk = ['gubun','case','info', 'count','grp','season']
+group_columns = list(chicken_df2.columns[chicken_df2.columns.str.contains('|'.join(group_chk))])
+
+# anova 결과 csv 파일
+for column_n in group_columns:
+    ## 그룹 생성
+    grps = list(chicken_df2[column_n].unique())
+    d_data = {grp: chicken_df2['lowQual'][chicken_df2[column_n] == grp] for grp in grps}
+    ## 그룹의 lowQaul value값만 추출
+    d_list = []         # 그룹의 lowQaul 추출 list
+    np_list = []        # 정규성 검정 결과 list
+    for grp in grps:
+        a = np.array(d_data[grp].values)
+        d_list.append(a)
+    d_list = np.array(d_list)
+
+    # 정규성 검정
+    for grp in grps:
+        # 표본의 크기가 5000 미만일 때 shapiro 정규성검정
+        if len(chicken_df2[column_n])<5000:
+            normal_pvalue = stats.shapiro(chicken_df2.loc[chicken_df2[column_n] == grp, 'lowQual']).pvalue
+            if normal_pvalue >= 0.05:
+                np_result = 1           # 정규성 만족
+            else:
+                np_result = 0           # 정규성 불만족
+        # 표본의 크기가 5000 이상일 때 anderson 정규성 검정
+        else:
+            ander_test = stats.anderson(chicken_df2.loc[chicken_df2[column_n] == grp, 'lowQual'], dist='norm')
+            if ander_test[0] >= ander_test.critical_values[2]:
+                np_result = 1
+            else:
+                np_result = 0
+        np_list.append(np_result)
+
+    # 정규성 만족시 등분산 검정
+    if all(item is 1 for item in np_list):
+        equal_pvalue = stats.bartlett(*d_list).pvalue
+        if equal_pvalue >= 0.05:
+            # 정규성, 등분산성 만족시 oneway_anova 검정
+            fvalue, pvalue = stats.f_oneway(*d_list)
+        else:
+            # 정규성 만족, 등분산성 불만족시 welch's anova 검정
+            pvalue = pg.welch_anova(dv='lowQual', between=column_n, data=chicken_df2)
+    else:
+        # 정규성 불만족시 크루스칼 검정
+        equal_pvalue = 'F'
+        fvalue, pvalue = stats.kruskal(*d_list)
+
+    if pvalue >=0.05:
+        result = 0      # 귀무가설 채택 : 평균 차이가 없다
+    else:
+        result = 1      # 대립가설 채택 : 평균 차이가 있다
+
+    b = pd.DataFrame({
+                      '변수': column_n,
+                      'normal_pvalue': normal_pvalue,
+                      'equal_pvalue': equal_pvalue,
+                      'ttest_pvalue': pvalue,
+                      'result' : result
+    }, index=[0])
+    anova_df = pd.concat([anova_df, b])
+anova_df.to_csv(eda_save_path + 'anova_result.csv', encoding='euc-kr', index=False)
+
+# anova 결과 시각화(lineplot)
+list_x = []
+for i in range(14, 53):
+    list_x.append(i+1)
+
+for column_n in group_columns:
+    sns.lineplot(data=chicken_df2, x='주령', y='lowQual', hue=column_n, palette = 'Set1')
+    plt.xlabel('주령')
+    plt.xticks(list_x, rotation = 0, fontsize=7)
+    plt.ylabel('오파란율')
+    plt.title(column_n + '변수 계군간 비교')
+    plt.legend()
+    plt.savefig(eda_save_path + str(column_n) + ' anova_결과 line 시각화.png')
+    plt.close()
+
+for column_n in group_columns:
+    sns.lineplot(data=chicken_df2, x='주령', y='lowQual', hue=column_n, palette = 'Set1')
+    plt.xlabel('주령')
+    plt.xticks(list_x, rotation = 0, fontsize=7)
+    plt.ylabel('오파란율')
+    plt.title(column_n + '변수 계군간 비교')
+    plt.legend()
+    plt.savefig(eda_save_path + str(column_n) + ' anova_결과 line 시각화.png')
+    plt.close()
+
+box_temp = chicken_df2[chicken_df2['주령']>19]
+
+for column_n in group_columns:
+    boxplot = sns.boxplot(x=column_n,  y='lowQual', data=box_temp, palette = 'Set1')
+
+    plt.xlabel(str(column_n)+" 구분")
+    plt.ylabel("오파란율 평균")
+    plt.title(str(column_n) + '그룹별 오파란율 비교')
+    plt.savefig('D:/한국식품안전관리인증원/분석/eda/산란계/221122/' + column_n + 'anova_비교.png')
+    plt.close()
+
+box_temp[box_temp['hot_count']>=20]
+
+box_temp.loc[box_temp['hot_count']<10, 'hot_count_grp']=0
+box_temp.loc[(box_temp['hot_count']>=10)&(box_temp['hot_count']<20), 'hot_count_grp']=1
+box_temp.loc[box_temp['hot_count']>=20, 'hot_count_grp']=2
+
+a = box_temp[box_temp['hot_count']>=20]
+
+for column_n in group_columns:
+    boxplot = sns.boxplot(x=column_n,  y='lowQual', data=box_temp, palette = 'Set1')
+
+    plt.xlabel(str(column_n)+" 구분")
+    plt.ylabel("오파란율 평균")
+    plt.title(str(column_n) + '그룹별 오파란율 비교')
+    plt.savefig('D:/한국식품안전관리인증원/분석/eda/산란계/221122/' + column_n + ' anova.png')
+    plt.close()
+
+
+# 계군별 그룹 scatter plot 시각화를 위해 계군 정보 필요 -> merge 진행
+anova_temp = chicken_df2[group_columns]
+
+group_df = chicken_df2['file_date']
+group_plot = pd.concat([group_df, anova_temp], axis=1)
+group_plot = group_plot.drop_duplicates()
+
+# 그룹 변수 숫자로 변환
+group_plot['gubun'] = group_plot['gubun'].apply(lambda x: 0 if x=='R1' else 1)      # R1 = 0, R2 = 1
+group_plot['case'] = group_plot['case'].apply(lambda x: 0 if x=='B1' else (1 if x=='B2' else (2 if x=='C1' else 3)))        #B1 = 0, B2 = 1, C1 = 2, C2 = 3
+group_plot['feed_info'] = group_plot['feed_info'].apply(lambda x: 0 if x=='현대' else (1 if x=='카길' else 2))      # 현대 = 0, 카길 = 1, 천하 = 3
+
+## 횟수 변수 그룹으로 임시 변환
+# 횟수 변수 = light_count,  hot count
+group_plot['light_count'] = group_plot['light_count'].apply(lambda x: 0 if x==10 else 1)      # light_count 10 = 0, 11 = 1
+group_plot['hot_count'] = group_plot['hot_count'].apply(lambda x: 1 if x==10 else (2 if x==15 else (3 if x==24 else (4 if x==27 else 0))))
+
+#groupA =['feed_grp','water_grp','weight_grp','egg_die_grp']
+#groupB =['gubun','case','feed_info','light_count','환경관리_count','환기관리_count','사료조정_count','급수조정_count','조도조정_count']
+#groupC =['AI_count','EDS_count','IB_count','ND_count']
+#groupD =['rain_count','hot_count','ws_gubun','season']
+
+y_list = [0,1,2,3,4,5]
+color_list = ['r','r','r','r','orange','orange','orange','orange','orange','orange','orange','orange','orange','g','g','g','g','b','b','b','b']
+
+## 그룹 시각화
+#for file_
+aa = group_plot[group_plot['file_date']==180501]
+aa = aa.drop(columns=['file_date'])
+
+fig, ax = plt.subplots()
+cmap = sns.color_palette("muted", n_colors=4)
+cmap = sns.color_palette("Set3", n_colors=4)
+color_map = dict(zip(group_columns, cmap))
+
+bb = aa.melt(value_vars=group_columns)
+sns.scatterplot(data = bb, x=bb['variable'], y=bb['value'], s=200, c=color_list)
+plt.xticks(rotation = 45, fontsize=9)
+plt.savefig(eda_save_path +' temp.png')
+plt.close()
+
+eda_save_path = 'D:/한국식품안전관리인증원/분석/eda/산란계/221110/그룹/'
+
+
+
+
+########################################################################################
+## 건수 -> 비율 변경 컬럼
+# 1. 계란품질 관련 컬럼 - 데이터셋에 있으므로 활용
+['산란율','주간_특왕','주간_왕란','주간_대란','주간_중란','주간_소란','주간_CRACK','주간_LIQUID','주간_BLOOD','주간_HC','주간_HD']
+
+# 2. 통계값 생성
+# - 사료급여량_수당gm, 수당_음수
+# - 산란율, 주간_특왕, 주간_왕란, 주간_특란, 주간_대란, 주간_중란, 주간_소란, 난중
+# - 주간_CRACK, 주간_DIRTY, 주간_LIQUID, 주간_BLOOD, 주간_HC, 주간_HD, 폐사율_일
+# - 기상 = 기온, 풍향, 풍속, 강수량, 습도
+## * 체중은 주단위 값만 존재 -> 주 평균값 생성 x
+cal_list = ['사료급여량_수당gm','수당_음수','산란율','주간_특왕','주간_왕란','주간_특란','주간_대란','주간_중란','주간_소란','주간_CRACK',
+            '주간_DIRTY','주간_LIQUID','주간_BLOOD','주간_HC','주간_HD','폐사율_일','난중','tp_1d_min', 'tp_1d_max', 'tp_1d_mean',
+            'ws_1d_min', 'ws_1d_max', 'ws_1d_mean', 'wd_mode','rain_sum', 'hd_1d_min','hd_1d_max','hd_1d_mean']
+
+cal_df = pd.DataFrame()
+for cal_col in cal_list:
+    # 주령별 통계값 생성
+    week_df = chicken_df2.copy()
+    week_df[cal_col] = pd.to_numeric(week_df[cal_col], errors='coerce')
+    week_df = week_df.groupby(['file_date','주령'])[cal_col].agg(['min', 'max', 'mean', 'sum', 'std']).add_prefix(cal_col + '_1w_').reset_index()
+
+    # 증감 여부 생성
+    week_df['shift'] = week_df[cal_col + '_1w_mean'].shift(1)
+    week_df[cal_col + '_change'] = week_df[cal_col + '_1w_mean'] - week_df['shift']
+    week_df[cal_col + '_change'] = week_df[cal_col + '_change'].apply(lambda x: 1 if x > 0 else (-1 if x < 0 else 0))      # 전날보다 증가한 경우 1, 똑같으면 0, 감소한경우 -1
+    week_df = week_df.drop(columns=['shift'])
+
+    if cal_col == '사료급여량_수당gm':
+        pass
+    else:
+        week_df = week_df.drop(columns=['file_date','주령'])
+    cal_df = pd.concat([cal_df, week_df], axis=1)
+
+chicken_df3 = pd.merge(chicken_df2, cal_df, on=['file_date','주령'], how='left')
+
+# type 확인
+cal_type = cal_df.apply(lambda x :x.type)
+
+
+
+# 3. 생성한 통계값 검증 (다음주의 오파란율과 상관분석)
+# 다음주 오파란율 최대, 최소, 평균값과 통계값 상관분석
+cal_col = 'lowQual'
+temp_df = chicken_df3.groupby(['file_date','주령'])[cal_col].agg(['min', 'max', 'mean']).add_prefix(cal_col + '_1w_').reset_index()
+temp_df = temp_df.sort_values(by=['file_date','주령'], ascending=[True, True])
+temp_df['lowQual_1w_min_shift'] = temp_df.groupby('file_date')['lowQual_1w_min'].shift(-1).fillna(0)
+temp_df['lowQual_1w_max_shift'] = temp_df.groupby('file_date')['lowQual_1w_max'].shift(-1).fillna(0)
+temp_df['lowQual_1w_mean_shift'] = temp_df.groupby('file_date')['lowQual_1w_mean'].shift(-1).fillna(0)
+temp_df = temp_df.drop(columns=['lowQual_1w_min','lowQual_1w_max','lowQual_1w_mean'])
+chicken_df3 = pd.merge(chicken_df3, temp_df, on=['file_date','주령'], how='left')
+
+x_list = list(cal_df.columns)
+del x_list[:2]      #filedate, 주령 drop
+
+y_list = ['lowQual_1w_min_shift','lowQual_1w_max_shift','lowQual_1w_mean_shift']
+corr_data = pd.DataFrame()
+for y_col in y_list:
+    for x_col in x_list:
+        x = chicken_df3[x_col].astype(float)
+        y = chicken_df3[y_col]
+        test_stat = kstest(x,y)
+        # 정규성 검정 결과 정규성을 따르면 피어슨, 따르지 않을시 스피어만 상관분석 실행
+        if test_stat.pvalue >= 0.05:
+            kstest_result = 'T'
+            corr = np.corrcoef(x, y)[0,1]
+        else:
+            kstest_result = 'F'
+            corr = scipy.stats.spearmanr(x, y).correlation
+        b = pd.DataFrame({
+                          'x': x_col,
+                          'y': y_col,
+                          '정규성 만족여부': kstest_result,
+                          'corr': corr}, index=[0])
+        corr_data = pd.concat([corr_data, b])
+corr_data.to_csv(eda_save_path + '상관분석(통계값_다음주 오파란 통계값).csv', encoding='euc-kr', index=False)
+
+# heatmap - 전체
+x_list.append('lowQual_1w_min_shift')
+x_list.append('lowQual_1w_max_shift')
+x_list.append('lowQual_1w_mean_shift')
+corr_df2 = pd.DataFrame(chicken_df3[x_list].corr('spearman'))
+sns.heatmap(data = corr_df2, annot=True, cmap = 'RdYlBu_r', fmt = '.1f', linewidths=.5, annot_kws={"size": 2}, xticklabels = corr_df2.columns, yticklabels = corr_df2.columns)
+plt.xticks(fontsize=4)
+plt.yticks(fontsize=4)
+plt.title('산란계 상관분석')
+plt.savefig(eda_save_path + '상관분석(통계값_다음주 오파란 통계값).png', bbox_inches='tight',pad_inches=1)
+plt.close()
+
+# heatmap - 사양현황
+# - 사료급여량_수당gm, 수당_음수, 폐사
+# - 기상 = 기온, 풍향, 풍속, 강수량, 습도
+group_chk = ['사료급여량','수당', '폐사율_일', 'tp','wd','ws','rain','hd']
+group_columns = list(chicken_df3.columns[chicken_df3.columns.str.contains('|'.join(group_chk))])
+
+group_columns.append('lowQual_1w_min_shift')
+group_columns.append('lowQual_1w_max_shift')
+group_columns.append('lowQual_1w_mean_shift')
+
+corr_df2 = pd.DataFrame(chicken_df3[group_columns].corr('spearman'))
+sns.heatmap(data = corr_df2, annot=True, cmap = 'RdYlBu_r', fmt = '.1f', linewidths=.5, annot_kws={"size": 4}, xticklabels = corr_df2.columns, yticklabels = corr_df2.columns)
+plt.xticks(fontsize=6)
+plt.yticks(fontsize=6)
+plt.title('산란계 상관분석')
+plt.savefig(eda_save_path + '상관분석(사양현황 통계값_다음주 오파란 통계값).png', bbox_inches='tight')
+plt.close()
+corr_df2 = corr_df2[['lowQual_1w_min_shift','lowQual_1w_max_shift','lowQual_1w_mean_shift']]
+corr_df2.to_csv(eda_save_path + '상관분석(사양현황 통계값_다음주 오파란 통계값).csv', encoding='euc-kr', index=True)
+
+# heatmap - 산란
+# - 산란율, 주간_특왕, 주간_왕란, 주간_특란, 주간_대란, 주간_중란, 주간_소란, 난중
+# - 주간_CRACK, 주간_DIRTY, 주간_LIQUID, 주간_BLOOD, 주간_HC, 주간_HD, 폐사율_일
+group_chk = ['산란율','주간', '난중']
+group_columns = list(chicken_df3.columns[chicken_df3.columns.str.contains('|'.join(group_chk))])
+
+lst = [item for item in group_columns if item != '산란율_최적' and item != '산란율_실적' and item != '주간헨데이_최적' and item != '주간헨데이_실적'
+       and item != '주간헨하우스_최적' and item != '주간헨하우스_실적' and item != '주간_헨데이' and item != '난중_표준' and item != '난중_실적']
+
+lst.append('lowQual_1w_min_shift')
+lst.append('lowQual_1w_max_shift')
+lst.append('lowQual_1w_mean_shift')
+
+corr_df2 = pd.DataFrame(chicken_df3[lst].corr('spearman'))
+sns.heatmap(data = corr_df2, annot=True, cmap = 'RdYlBu_r', fmt = '.1f', linewidths=.5, annot_kws={"size": 3}, xticklabels = corr_df2.columns, yticklabels = corr_df2.columns)
+plt.xticks(fontsize=4)
+plt.yticks(fontsize=4)
+plt.title('산란계 상관분석')
+plt.savefig(eda_save_path + '상관분석(산란 통계값_다음주 오파란 통계값).png', bbox_inches='tight')
+plt.close()
+corr_df2 = corr_df2[['lowQual_1w_min_shift','lowQual_1w_max_shift','lowQual_1w_mean_shift']]
+corr_df2.to_csv(eda_save_path + '상관분석(산란 통계값_다음주 오파란 통계값).csv', encoding='euc-kr', index=True)
+
+
+
+################################ model_df 생성
+## y값 생성
+# 3일후 오파란율
+chicken_df3 = chicken_df3.sort_values(by=['file_date','월일'], ascending=[True, True])
+chicken_df3['lowQual_3d'] = chicken_df3.groupby('file_date')['lowQual'].shift(-3).fillna(0)
+
+# 17주령 이후 모델 활용
+chicken_df4 = chicken_df3[chicken_df3['주령']>=17]
+# 폐사율 100 제거
+chicken_df4 = chicken_df4[chicken_df4['lowQual']<100]
+chicken_df4 = chicken_df4[chicken_df4['lowQual_3d']<100]
+
+# 생육환경 컬럼
+
+model_temp = chicken_df4[['file_date','일령','월일','사료급여량_수당gm','수당_음수','평균체중_실적(주령)','산란율','주간_특왕','주간_왕란','주간_특란','주간_대란','주간_중란','주간_소란','주간_CRACK',
+            '주간_DIRTY','주간_LIQUID','주간_BLOOD','주간_HC','주간_HD','폐사율_일','난중','tp_1d_min', 'tp_1d_max', 'tp_1d_mean',
+            'ws_1d_min', 'ws_1d_max', 'ws_1d_mean', 'wd_mode','rain_sum', 'hd_1d_min','hd_1d_max','hd_1d_mean','lowQual','lowQual_3d']]
+
+################################# anova, 상관분석 결과 반영
+# anova, 상관분석 결과 활용 컬럼 list에 추가
+anova_accept = anova_df[anova_df['result'] == 1]
+anova_accept = list(anova_accept['변수'].values)
+model_anova = chicken_df4[anova_accept]
+#ver1
+corr_accept = corr_data[(corr_data['corr'] > 0.1)|(corr_data['corr'] < -0.1)]
+corr_accept = list(corr_accept['x'].values)
+corr_accept = list(set(corr_accept))
+model_corr = chicken_df4[corr_accept]
+
+model_temp = pd.concat([model_temp, model_anova], axis=1)
+model_df = pd.concat([model_temp, model_corr], axis=1)
+model_df.to_csv('D:/한국식품안전관리인증원/분석 데이터/datamart/model_df(1).csv', encoding='euc-kr', index=False)
+
+
+################################ model_df 변수 type 변경
+#model_df : 사료급여량_수당gm, wd_mode, gubun, case, feed_info
+model_df = pd.read_csv('D:/한국식품안전관리인증원/분석 데이터/datamart/model_df(1).csv', encoding='euc-kr')
+group_chk = ['사료급여량','수당', '폐사율_일', 'tp','wd','ws','rain','hd']
+group_columns = list(model_df.columns[model_df.columns.str.contains('|'.join(group_chk))])
+model_df['사료급여량_수당gm'] = pd.to_numeric(model_df['사료급여량_수당gm'], errors='coerce')
+model_df['사료급여량_수당gm'] = model_df['사료급여량_수당gm'].fillna(0)
+model_df['wd_mode'] = pd.to_numeric(model_df['wd_mode'], errors='coerce')
+model_df['gubun'] = model_df['gubun'].apply(lambda x: 0 if x=='R1' else 1)      # R1 = 0, R2 = 1
+model_df['case'] = model_df['case'].apply(lambda x: 0 if x=='B1' else (1 if x=='B2' else (2 if x=='C1' else 3)))        #B1 = 0, B2 = 1, C1 = 2, C2 = 3
+model_df['feed_info'] = model_df['feed_info'].apply(lambda x: 0 if x=='현대' else (1 if x=='카길' else 2))      # 현대 = 0, 카길 = 1, 천하 = 3
+
+
+############################### 모델 학습
+##### 일자로 train / test 구분
+model_df['월일'].max()
+train_set = model_df[model_df['월일']<='2022-02-09']
+test_set = model_df[model_df['월일']>'2022-02-09']
+
+##### 계군으로 train / test 구분
+train_set = model_df[model_df['file_date']!=210504]
+test_set = model_df[model_df['file_date']==210504]
+
+
+train_x = train_set.drop(['lowQual_3d'], axis=1)
+train_y = train_set['lowQual_3d']
+test_x = test_set.drop(['lowQual_3d'], axis=1)
+test_y = test_set['lowQual_3d']
+
+train_x2 = train_x.drop(columns=['file_date','월일'])
+test_x2 = test_x.drop(columns=['file_date','월일'])
+
+# 모델결과 저장 csv 생성
+model_save_path = 'D:/한국식품안전관리인증원/분석/model/221109/'
+model_ev = pd.DataFrame(columns=['model', 'rmse', 'r2', 'mae', 'mape'])
+model_ev.to_csv(model_save_path + '/egg_model_evaluationMetrix_200131.csv', encoding='euc-kr', index=False)
+
+## xgboost model
+## 원래 ver
+xgb_param = {'learning_rate': 0.1, 'max_depth': 3, 'n_estimators': 100, 'subsample': 0.9}
+xgb_model = XGBRegressor(**xgb_param, random_state=42)
+xgb_model.fit(train_x2, train_y)
+#joblib.dump(xgb_model,'D:/한국식품안전관리인증원/분석/model/221109/xgb_model.pkl') # xgb 모델 dump
+y_pred = xgb_model.predict(test_x2)
+# 예측값에 음수가 있는 경우 값을 0으로 바꿈
+y_pred = list(map(lambda x: 0 if x<0 else x, y_pred))
+
+# 계군 학습 ver
+xgb_param = {'learning_rate': [0.01, 0.05, 0.1],
+             'subsample': [0.5, 0.8, 0.9, 1.0],
+             'max_depth': [3, 5, 7, 9],
+             'n_estimators': [100]}
+
+xgb_model = GridSearchCV(xgb_model, param_grid=xgb_param, verbose=1, cv=3)  # cv 수정
+xgb_model.fit(train_x2, train_y)
+scores_df = pd.DataFrame(xgb_model.cv_results_)
+scores_df.to_csv(eda_save_path + 'xgb_gridSearch_221112.csv', encoding='euc-kr', index=False)
+
+xgb_param = xgb_model.best_params_
+xgb_model = XGBRegressor(**xgb_param, random_state=42)
+xgb_model.fit(train_x2, train_y)
+y_pred = xgb_model.predict(test_x2)
+# 예측값에 음수가 있는 경우 값을 0으로 바꿈
+y_pred = list(map(lambda x: 0 if x<0 else x, y_pred))
+
+# 예측 결과 검증
+temp_df = pd.DataFrame(y_pred, index=test_y.index)
+df = pd.concat([test_y, temp_df], axis=1)
+
+model = 'xgb'
+rmse = np.sqrt(mean_squared_error(test_y, y_pred))
+r2 = r2_score(test_y, y_pred)
+mae = mean_absolute_error(test_y, y_pred)
+mape = mean_absolute_percentage_error(test_y, y_pred)
+
+a = pd.DataFrame({'model': model , 'rmse': rmse, 'r2': r2, 'mae': mae, 'mape': mape}, index=[0])
+a.to_csv(model_save_path + '/egg_model_evaluationMetrix_200131.csv', encoding='euc-kr', index=False, mode='a',header=False)
+
+xgb_result = pd.DataFrame(y_pred, columns=['predict'], index =test_y.index)
+xgb_result2 = pd.concat([test_y, xgb_result], axis=1)
+xgb_result2.to_csv('D:/한국식품안전관리인증원/분석/model/221109/xgb_predict.csv', encoding='euc-kr', index=False)
+
+day_x = test_x[['월일','lowQual']]
+
+model_result = pd.concat([day_x, xgb_result], axis=1)
+
+model_result['result'] = model_result['predict'] - model_result['lowQual']
+model_result['result'] = model_result['result'].apply(lambda x : '정상' if x<0.4 else ('위험' if (x>=4)&(x<0.9) else '이상'))
+model_result.rename(columns={'lowQual':'당일 오파란율','predict':'3일 후 오파란율'})
+model_result.to_csv('D:/한국식품안전관리인증원/분석/model/221109/xgb_pred_result.csv', encoding='euc-kr', index=False)
+
+## lightGBM
+lgb_model = lgb.LGBMRegressor(random_state=42)
+
+# eval_metric='logloss'
+lgb_param = {'learning_rate': [0.01, 0.05, 0.1],
+             'subsample': [0.5, 0.8, 0.9, 1.0],
+             'max_depth': [3, 5, 7, 9],
+             'n_estimators': [100]}
+
+lgb_model = GridSearchCV(lgb_model, param_grid=lgb_param, verbose=1, cv=3)  # cv 수정
+lgb_model.fit(train_x2, train_y)
+scores_df = pd.DataFrame(lgb_model.cv_results_)
+scores_df.to_csv(eda_save_path + 'lgb_gridSearch_221112.csv', encoding='euc-kr', index=False)
+
+best_param = lgb_model.best_params_
+lgb_model = lgb.LGBMRegressor(**best_param, random_state=42)
+lgb_model.fit(train_x2, train_y)
+y_pred = lgb_model.predict(test_x2)
+# 예측값에 음수가 있는 경우 값을 0으로 바꿈
+y_pred = list(map(lambda x: 0 if x<0 else x, y_pred))
+
+temp_df = pd.DataFrame(y_pred, index=test_y.index)
+df = pd.concat([test_y, temp_df], axis=1)
+
+model = 'lgb'
+rmse = np.sqrt(mean_squared_error(test_y, y_pred))
+r2 = r2_score(test_y, y_pred)
+mae = mean_absolute_error(test_y, y_pred)
+mape = mean_absolute_percentage_error(test_y, y_pred)
+
+a = pd.DataFrame({'model': model , 'rmse': rmse, 'r2': r2, 'mae': mae, 'mape': mape}, index=[0])
+a.to_csv(model_save_path + '/egg_model_evaluationMetrix_200131.csv', encoding='euc-kr', index=False, mode='a',header=False)
+
+############## 선형회귀 모형 릿지 랏쏘
+# 릿지
+ridge_model = Ridge(random_state=42)
+parameters = {'alpha': [0.1, 0.01, 0.5]}
+ridge_model = GridSearchCV(ridge_model, parameters ,cv=3)
+ridge_model.fit(train_x2, train_y)
+scores_df = pd.DataFrame(ridge_model.cv_results_)
+scores_df.to_csv(eda_save_path + 'ridge_gridSearch_221112.csv', encoding='euc-kr', index=False)
+
+best_param = ridge_model.best_params_
+ridge_model = Ridge(**best_param, random_state=42)
+ridge_model.fit(train_x2, train_y)
+y_pred = ridge_model.predict(test_x2)
+
+temp_df = pd.DataFrame(y_pred, index=test_y.index)
+df = pd.concat([test_y, temp_df], axis=1)
+
+model = 'ridge'
+rmse = np.sqrt(mean_squared_error(test_y, y_pred))
+#r2 = r2_score(test_y, y_pred)
+SSR = np.sum((y_pred - np.mean(test_y))**2)
+SSE = np.sum((test_y - y_pred)**2)
+SSTO = SSR+SSE
+r2 = (SSR/SSTO, 1-SSE/SSTO)[0]
+
+mae = mean_absolute_error(test_y, y_pred)
+mape = mean_absolute_percentage_error(test_y, y_pred)
+a = pd.DataFrame({'model': model , 'rmse': rmse, 'r2': r2, 'mae': mae, 'mape': mape}, index=[0])
+a.to_csv(model_save_path + '/egg_model_evaluationMetrix_200131.csv', encoding='euc-kr', index=False, mode='a',header=False)
+
+# 랏쏘
+lasso_model = Lasso(random_state=42)
+parameters = {'alpha': [0.1, 0.01, 0.5]}
+lasso_model = GridSearchCV(lasso_model, parameters ,cv=3)
+lasso_model.fit(train_x2, train_y)
+scores_df = pd.DataFrame(lasso_model.cv_results_)
+scores_df.to_csv(eda_save_path + 'lasso_gridSearch_221112.csv', encoding='euc-kr', index=False)
+
+best_param = lasso_model.best_params_
+lasso_model = Lasso(**best_param, random_state=42)
+lasso_model.fit(train_x2, train_y)
+y_pred = lasso_model.predict(test_x2)
+
+temp_df = pd.DataFrame(y_pred, index=test_y.index)
+df = pd.concat([test_y, temp_df], axis=1)
+
+rmse = np.sqrt(mean_squared_error(test_y, y_pred))
+r2 = r2_score(test_y, y_pred)
+mae = mean_absolute_error(test_y, y_pred)
+mape = mean_absolute_percentage_error(test_y, y_pred)
+
+
+
+
+
+################################################################################################################## 안씀
+
+### gridSearch 적용
+xgb_model = XGBRegressor(random_state=42)
+xgb_param = {'learning_rate': [0.01, 0.05, 0.1],
+             'subsample': [0.5, 0.8, 0.9, 1.0],
+             'max_depth': [3, 5, 7, 9],
+             'n_estimators': [100]}
+
+xgb_model = GridSearchCV(xgb_model, param_grid=xgb_param, verbose=1, cv=3)  # cv 수정
+xgb_model.fit(train_x2, train_y)
+scores_df = pd.DataFrame(xgb_model.cv_results_)
+scores_df.to_csv(eda_save_path + 'xgb_gridSearch_221112.csv', encoding='euc-kr', index=False)
+
+
+best_param = xgb_model.best_params_
+xgb_model = XGBRegressor(**best_param)
+xgb_model.fit(train_x2, train_y)
+y_pred = xgb_model.predict(test_x2)
+
+temp_df = pd.DataFrame(y_pred, index=test_y.index)
+df = pd.concat([test_y, temp_df], axis=1)
+
+rmse = np.sqrt(mean_squared_error(test_y, y_pred))
+r2 = r2_score(test_y, y_pred)
+mae = mean_absolute_error(test_y, y_pred)
+mape = mean_absolute_percentage_error(test_y, y_pred)
+
+SSR = np.sum((y_pred - np.mean(test_y))**2)
+SSE = np.sum((test_y - y_pred)**2)
+SSTO = SSR+SSE
+print(SSR/SSTO, 1-SSE/SSTO)
+
+# 사료구분
+gubun = ['현대', '카길', '천하', '서부']
+gubun_df = pd.DataFrame(list(combinations(gubun, 2)),columns=['a','b'])
+gubun_df['feed_nm'] = gubun_df['a']+'/'+gubun_df['b']
+gubun_df = pd.concat([gubun_df.drop(columns=['a','b']), pd.DataFrame(gubun, columns=['feed_nm'])],ignore_index=True)
+
+
+## 일별 폐사율 생성 - 성계의 오파란율
+chicken_df = egg_df.copy()
+chicken_df['전체수수_일'] = chicken_df['폐사건수_일'] + chicken_df['생존수수_일']
+chicken_df['폐사율_일'] = (chicken_df['폐사건수_일'] / chicken_df['전체수수_일']) * 100
+chicken_df['lowQual'] = (chicken_df['주간_CRACK'] + chicken_df['주간_DIRTY']) * 100
+
+chicken_df2 = chicken_df[(chicken_df['주령']>=15)&(chicken_df['주령']<=53)]
+
+
+# 다음주 오파란율
+chicken_df3 = chicken_df3.sort_values(by=['file_date','월일'], ascending=[True, True])
+chicken_df3['lowQual_7'] = chicken_df3.groupby('file_date')['lowQual'].shift(-7).fillna(0)
+
+x_list = list(cal_df.columns)
+del x_list[:2]      #filedate, 주령 drop
+
+corr_data = pd.DataFrame()
+for x_col in x_list:
+    x = chicken_df3[x_col].astype(float)
+    y = chicken_df3['lowQual_7']
+    test_stat = kstest(x,y)
+    # 정규성 검정 결과 정규성을 따르면 피어슨, 따르지 않을시 스피어만 상관분석 실행
+    if test_stat.pvalue >= 0.05:
+        kstest_result = 'T'
+        corr = np.corrcoef(x, y)[0,1]
+    else:
+        kstest_result = 'F'
+        corr = scipy.stats.spearmanr(x, y).correlation
+    b = pd.DataFrame({
+                      'x': x_col,
+                      'y': 'lowQual_7',
+                      '정규성 만족여부': kstest_result,
+                      'corr': corr}, index=[0])
+    corr_data = pd.concat([corr_data, b])
+corr_data.to_csv(eda_save_path + '상관분석(통계값_7일후 오파란율).csv', encoding='euc-kr', index=False)
+
+# heatmap
+x_list.append('lowQual_7')
+corr_df2 = pd.DataFrame(chicken_df3[x_list].corr('spearman'))
+sns.heatmap(data = corr_df2, annot=True, cmap = 'RdYlBu_r', fmt = '.1f', linewidths=.5, annot_kws={"size": 2}, xticklabels = corr_df2.columns, yticklabels = corr_df2.columns)
+plt.xticks(fontsize=4)
+plt.yticks(fontsize=4)
+plt.title('산란계 상관분석')
+plt.savefig(eda_save_path + '상관분석(통계값_7일후 오파란율).png', bbox_inches='tight',pad_inches=1)
+plt.close()
+
