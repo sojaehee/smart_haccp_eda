@@ -77,7 +77,7 @@ egg_df = egg_df.rename(columns={'수당(음수)':'수당_음수'})
 egg_df = egg_df[egg_df['file_date']!=200922]
 
 ###### 육추계 그룹화 변수 추가
-eda_save_path = 'D:/한국식품안전관리인증원/분석/eda/산란계/221110/생육환경(육추)/'
+eda_save_path = ''
 egg_df2 = egg_df[egg_df['주령']<=15]      # 육추 데이터만 분리(1~15주령)
 egg_df3 = egg_df.copy()                # 구분된 데이터 egg_df3에 넣음
 
@@ -247,12 +247,11 @@ chicken_df['폐사율_일'] = (chicken_df['폐사건수_일'] / chicken_df['전�
 chicken_df['lowQual'] = (chicken_df['주간_CRACK'] + chicken_df['주간_DIRTY']) * 100
 
 chicken_df2 = chicken_df[(chicken_df['주령']>=15)&(chicken_df['주령']<=53)]
-chicken_df2.to_csv('D:/한국식품안전관리인증원/분석 데이터/datamart/egg_datamart_v2.csv', encoding='euc-kr', index=False)
+chicken_df2.to_csv('egg_datamart_v2.csv', encoding='euc-kr', index=False)
 
 
 ##################################################################################
 ### 생육환경 그룹별 오파란율 변화 확인 -> anova
-chicken_df2 = pd.read_csv('D:/한국식품안전관리인증원/분석 데이터/datamart/egg_datamart_v2.csv', encoding='euc-kr')
 
 ### 전체계군 오파란율 평균
 lowqual = chicken_df2.groupby(['주령'])['lowQual'].mean().reset_index(name='mean')
@@ -372,7 +371,7 @@ for column_n in group_columns:
     plt.xlabel(str(column_n)+" 구분")
     plt.ylabel("오파란율 평균")
     plt.title(str(column_n) + '그룹별 오파란율 비교')
-    plt.savefig('D:/한국식품안전관리인증원/분석/eda/산란계/221122/' + column_n + 'anova_비교.png')
+    plt.savefig(eda_save_path + column_n + 'anova_비교.png')
     plt.close()
 
 box_temp[box_temp['hot_count']>=20]
@@ -389,7 +388,7 @@ for column_n in group_columns:
     plt.xlabel(str(column_n)+" 구분")
     plt.ylabel("오파란율 평균")
     plt.title(str(column_n) + '그룹별 오파란율 비교')
-    plt.savefig('D:/한국식품안전관리인증원/분석/eda/산란계/221122/' + column_n + ' anova.png')
+    plt.savefig(eda_save_path + column_n + ' anova.png')
     plt.close()
 
 
@@ -433,11 +432,6 @@ sns.scatterplot(data = bb, x=bb['variable'], y=bb['value'], s=200, c=color_list)
 plt.xticks(rotation = 45, fontsize=9)
 plt.savefig(eda_save_path +' temp.png')
 plt.close()
-
-eda_save_path = 'D:/한국식품안전관리인증원/분석/eda/산란계/221110/그룹/'
-
-
-
 
 ########################################################################################
 ## 건수 -> 비율 변경 컬럼
@@ -604,12 +598,10 @@ model_corr = chicken_df4[corr_accept]
 
 model_temp = pd.concat([model_temp, model_anova], axis=1)
 model_df = pd.concat([model_temp, model_corr], axis=1)
-model_df.to_csv('D:/한국식품안전관리인증원/분석 데이터/datamart/model_df(1).csv', encoding='euc-kr', index=False)
-
 
 ################################ model_df 변수 type 변경
 #model_df : 사료급여량_수당gm, wd_mode, gubun, case, feed_info
-model_df = pd.read_csv('D:/한국식품안전관리인증원/분석 데이터/datamart/model_df(1).csv', encoding='euc-kr')
+
 group_chk = ['사료급여량','수당', '폐사율_일', 'tp','wd','ws','rain','hd']
 group_columns = list(model_df.columns[model_df.columns.str.contains('|'.join(group_chk))])
 model_df['사료급여량_수당gm'] = pd.to_numeric(model_df['사료급여량_수당gm'], errors='coerce')
@@ -640,7 +632,7 @@ train_x2 = train_x.drop(columns=['file_date','월일'])
 test_x2 = test_x.drop(columns=['file_date','월일'])
 
 # 모델결과 저장 csv 생성
-model_save_path = 'D:/한국식품안전관리인증원/분석/model/221109/'
+model_save_path = ''
 model_ev = pd.DataFrame(columns=['model', 'rmse', 'r2', 'mae', 'mape'])
 model_ev.to_csv(model_save_path + '/egg_model_evaluationMetrix_200131.csv', encoding='euc-kr', index=False)
 
@@ -649,7 +641,7 @@ model_ev.to_csv(model_save_path + '/egg_model_evaluationMetrix_200131.csv', enco
 xgb_param = {'learning_rate': 0.1, 'max_depth': 3, 'n_estimators': 100, 'subsample': 0.9}
 xgb_model = XGBRegressor(**xgb_param, random_state=42)
 xgb_model.fit(train_x2, train_y)
-#joblib.dump(xgb_model,'D:/한국식품안전관리인증원/분석/model/221109/xgb_model.pkl') # xgb 모델 dump
+#joblib.dump(xgb_model,'xgb_model.pkl') # xgb 모델 dump
 y_pred = xgb_model.predict(test_x2)
 # 예측값에 음수가 있는 경우 값을 0으로 바꿈
 y_pred = list(map(lambda x: 0 if x<0 else x, y_pred))
@@ -696,7 +688,7 @@ model_result = pd.concat([day_x, xgb_result], axis=1)
 model_result['result'] = model_result['predict'] - model_result['lowQual']
 model_result['result'] = model_result['result'].apply(lambda x : '정상' if x<0.4 else ('위험' if (x>=4)&(x<0.9) else '이상'))
 model_result.rename(columns={'lowQual':'당일 오파란율','predict':'3일 후 오파란율'})
-model_result.to_csv('D:/한국식품안전관리인증원/분석/model/221109/xgb_pred_result.csv', encoding='euc-kr', index=False)
+model_result.to_csv('xgb_pred_result.csv', encoding='euc-kr', index=False)
 
 ## lightGBM
 lgb_model = lgb.LGBMRegressor(random_state=42)
@@ -781,94 +773,3 @@ rmse = np.sqrt(mean_squared_error(test_y, y_pred))
 r2 = r2_score(test_y, y_pred)
 mae = mean_absolute_error(test_y, y_pred)
 mape = mean_absolute_percentage_error(test_y, y_pred)
-
-
-
-
-
-################################################################################################################## 안씀
-
-### gridSearch 적용
-xgb_model = XGBRegressor(random_state=42)
-xgb_param = {'learning_rate': [0.01, 0.05, 0.1],
-             'subsample': [0.5, 0.8, 0.9, 1.0],
-             'max_depth': [3, 5, 7, 9],
-             'n_estimators': [100]}
-
-xgb_model = GridSearchCV(xgb_model, param_grid=xgb_param, verbose=1, cv=3)  # cv 수정
-xgb_model.fit(train_x2, train_y)
-scores_df = pd.DataFrame(xgb_model.cv_results_)
-scores_df.to_csv(eda_save_path + 'xgb_gridSearch_221112.csv', encoding='euc-kr', index=False)
-
-
-best_param = xgb_model.best_params_
-xgb_model = XGBRegressor(**best_param)
-xgb_model.fit(train_x2, train_y)
-y_pred = xgb_model.predict(test_x2)
-
-temp_df = pd.DataFrame(y_pred, index=test_y.index)
-df = pd.concat([test_y, temp_df], axis=1)
-
-rmse = np.sqrt(mean_squared_error(test_y, y_pred))
-r2 = r2_score(test_y, y_pred)
-mae = mean_absolute_error(test_y, y_pred)
-mape = mean_absolute_percentage_error(test_y, y_pred)
-
-SSR = np.sum((y_pred - np.mean(test_y))**2)
-SSE = np.sum((test_y - y_pred)**2)
-SSTO = SSR+SSE
-print(SSR/SSTO, 1-SSE/SSTO)
-
-# 사료구분
-gubun = ['현대', '카길', '천하', '서부']
-gubun_df = pd.DataFrame(list(combinations(gubun, 2)),columns=['a','b'])
-gubun_df['feed_nm'] = gubun_df['a']+'/'+gubun_df['b']
-gubun_df = pd.concat([gubun_df.drop(columns=['a','b']), pd.DataFrame(gubun, columns=['feed_nm'])],ignore_index=True)
-
-
-## 일별 폐사율 생성 - 성계의 오파란율
-chicken_df = egg_df.copy()
-chicken_df['전체수수_일'] = chicken_df['폐사건수_일'] + chicken_df['생존수수_일']
-chicken_df['폐사율_일'] = (chicken_df['폐사건수_일'] / chicken_df['전체수수_일']) * 100
-chicken_df['lowQual'] = (chicken_df['주간_CRACK'] + chicken_df['주간_DIRTY']) * 100
-
-chicken_df2 = chicken_df[(chicken_df['주령']>=15)&(chicken_df['주령']<=53)]
-
-
-# 다음주 오파란율
-chicken_df3 = chicken_df3.sort_values(by=['file_date','월일'], ascending=[True, True])
-chicken_df3['lowQual_7'] = chicken_df3.groupby('file_date')['lowQual'].shift(-7).fillna(0)
-
-x_list = list(cal_df.columns)
-del x_list[:2]      #filedate, 주령 drop
-
-corr_data = pd.DataFrame()
-for x_col in x_list:
-    x = chicken_df3[x_col].astype(float)
-    y = chicken_df3['lowQual_7']
-    test_stat = kstest(x,y)
-    # 정규성 검정 결과 정규성을 따르면 피어슨, 따르지 않을시 스피어만 상관분석 실행
-    if test_stat.pvalue >= 0.05:
-        kstest_result = 'T'
-        corr = np.corrcoef(x, y)[0,1]
-    else:
-        kstest_result = 'F'
-        corr = scipy.stats.spearmanr(x, y).correlation
-    b = pd.DataFrame({
-                      'x': x_col,
-                      'y': 'lowQual_7',
-                      '정규성 만족여부': kstest_result,
-                      'corr': corr}, index=[0])
-    corr_data = pd.concat([corr_data, b])
-corr_data.to_csv(eda_save_path + '상관분석(통계값_7일후 오파란율).csv', encoding='euc-kr', index=False)
-
-# heatmap
-x_list.append('lowQual_7')
-corr_df2 = pd.DataFrame(chicken_df3[x_list].corr('spearman'))
-sns.heatmap(data = corr_df2, annot=True, cmap = 'RdYlBu_r', fmt = '.1f', linewidths=.5, annot_kws={"size": 2}, xticklabels = corr_df2.columns, yticklabels = corr_df2.columns)
-plt.xticks(fontsize=4)
-plt.yticks(fontsize=4)
-plt.title('산란계 상관분석')
-plt.savefig(eda_save_path + '상관분석(통계값_7일후 오파란율).png', bbox_inches='tight',pad_inches=1)
-plt.close()
-
