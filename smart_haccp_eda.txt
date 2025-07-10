@@ -638,7 +638,7 @@ model_ev.to_csv(model_save_path + '/egg_model_evaluationMetrix_200131.csv', enco
 
 ## xgboost model
 ## 원래 ver
-xgb_param = {'learning_rate': 0.1, 'max_depth': 3, 'n_estimators': 100, 'subsample': 0.9}
+xgb_param = {'learning_rate': 0.1, 'max_depth': 50, 'n_estimators': 100, 'subsample': 0.9}
 xgb_model = XGBRegressor(**xgb_param, random_state=42)
 xgb_model.fit(train_x2, train_y)
 #joblib.dump(xgb_model,'xgb_model.pkl') # xgb 모델 dump
@@ -649,7 +649,7 @@ y_pred = list(map(lambda x: 0 if x<0 else x, y_pred))
 # 계군 학습 ver
 xgb_param = {'learning_rate': [0.01, 0.05, 0.1],
              'subsample': [0.5, 0.8, 0.9, 1.0],
-             'max_depth': [3, 5, 7, 9],
+             'max_depth': [50, 100, 200, 300],
              'n_estimators': [100]}
 
 xgb_model = GridSearchCV(xgb_model, param_grid=xgb_param, verbose=1, cv=3)  # cv 수정
@@ -679,7 +679,7 @@ a.to_csv(model_save_path + '/egg_model_evaluationMetrix_200131.csv', encoding='e
 
 xgb_result = pd.DataFrame(y_pred, columns=['predict'], index =test_y.index)
 xgb_result2 = pd.concat([test_y, xgb_result], axis=1)
-xgb_result2.to_csv('D:/한국식품안전관리인증원/분석/model/221109/xgb_predict.csv', encoding='euc-kr', index=False)
+xgb_result2.to_csv('xgb_predict.csv', encoding='euc-kr', index=False)
 
 day_x = test_x[['월일','lowQual']]
 
@@ -696,7 +696,7 @@ lgb_model = lgb.LGBMRegressor(random_state=42)
 # eval_metric='logloss'
 lgb_param = {'learning_rate': [0.01, 0.05, 0.1],
              'subsample': [0.5, 0.8, 0.9, 1.0],
-             'max_depth': [3, 5, 7, 9],
+             'max_depth': [50, 100, 150, 200],
              'n_estimators': [100]}
 
 lgb_model = GridSearchCV(lgb_model, param_grid=lgb_param, verbose=1, cv=3)  # cv 수정
